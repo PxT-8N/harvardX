@@ -1,0 +1,383 @@
+---
+pdf_document:
+  toc: yes
+  toc_float: yes
+  toc_depth: 3
+  number_sections: yes
+date: "10-09-2021"
+title: "Cardiovascular disease prediction report - HarvardX PH125.9x - Capstone"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if(!require(tidyverse)) install.packages("tidyverse") 
+if(!require(kableExtra)) install.packages("kableExtra")
+if(!require(tidyr)) install.packages("tidyr")
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(stringr)) install.packages("stringr")
+if(!require(forcats)) install.packages("forcats")
+if(!require(ggplot2)) install.packages("ggplot2")
+if(!require(pbapply)) install.packages("pbapply")
+if(!require(pbapply)) install.packages("gridExtra")
+if(!require(pbapply)) install.packages("ggcorrplot")
+if(!require(glmnet)) install.packages("glmnet")
+if(!require(glmnet)) install.packages("xgboost")
+
+library(dplyr)
+library(tidyverse)
+library(kableExtra)
+library(tidyr)
+library(stringr)
+library(forcats)
+library(ggplot2)
+library(pbapply)
+library(caret)
+library(gridExtra)
+library(ggcorrplot)
+library(nnet)
+library(randomForest)
+library(glmnet)
+library(xgboost)
+```
+
+# Introduction
+
+In my project I'm going to create machine learning models, which are capable of predicting presence of absence of cardiovascular disease.
+
+
+## Dataset
+
+Our task is to create binary classification for presence (1) or absence (0) of cardiovascular disease. <https://www.kaggle.com/sulianova/cardiovascular-disease-dataset>
+
+Our dataset is separated by ";", so we need to load it with:
+
+```{r, include=TRUE}
+ds <- read.csv("cardio.csv", sep = ';')
+```
+
+Full dataset contains `r dim(ds)[1]` rows and `r dim(ds)[2]` columns. Value of each column was described in table 1.
+
+Table 1. Description of columns
+
+```{r, echo=FALSE}
+Description <- c("Unique identification number", "Age (days)", "Gender (1 - woman, 2 -man)", "Height (cm)","Weight (kg)", "Systolic blood pressure","Diastolic blood pressure", "Cholesterol (1 - normal, 2 - above normal, 3 - well above normal)","Glucose (1 - normal, 2 - above normal, 3 - well above normal)", "Smoking (0 - no, 1 - yes)", "Alcohol intake (0 - no, 1 - yes)", "Physical activity (0 - no, 1 - yes)", "Presence or absence of cardiovascular disease (0 - absence, 1 - presence)")
+
+data.frame(Variable = names(ds),
+           Class = sapply(ds, typeof),
+           First_values = sapply(ds, function(x) paste0(head(x),  collapse = ", ")),
+           row.names = NULL, Description = Description) %>% 
+           kable() %>% 
+           kable_styling(bootstrap_options = c("striped"), 
+                          position = "center", 
+                          font_size = 10, full_width = TRUE)
+```
+
+# 1. Analysis
+
+## 1.1. Preprocessing
+All of the data is in good shape, but let's change age in days to age in years and remove column id, because it contains just incrementing numbers for each row.
+```{r, include=TRUE}
+# Change age from days to years
+ds <- ds %>% mutate(age = round(age/365, digits = 0)) %>% select(-id)
+```
+
+Also data contains values of systolic blood pressure and diastolic blood pressure with different formating. Like 150 and 15000 - both means the same, so unify it, by following code:
+
+```{r, include=TRUE}
+ds <- ds %>%
+  mutate(ap_hi = if_else(nchar(ap_hi) > 3,as.integer(ap_hi/100),ap_hi),
+         ap_lo = if_else(nchar(ap_lo) > 3,as.integer(ap_lo/100),ap_lo))
+```
+
+After next examination there are still some values that are impossible, so let's preprocess it
+
+```{r, include=TRUE}
+ds <- ds %>%
+  mutate(ap_hi = if_else(ap_hi > 250,as.integer(ap_hi/10),ap_hi),
+         ap_lo = if_else(ap_lo > 250,as.integer(ap_lo/10),ap_lo))
+```
+
+So in our dataset there are still 0 values for blood preasure and values that are too low, remove them.
+Based on study Bambrick H. - Relationships between BMI, waist circumference, hypertension and fasting glucose: Rethinking risk factors in Indigenous diabetes (https://www.researchgate.net/publication/241225018_Relationships_between_BMI_waist_circumference_hypertension_and_fasting_glucose_Rethinking_risk_factors_in_Indigenous_diabetes) let's get data with ap_hi and ap_lo above 60.
+```{r, include=TRUE}
+ds <- ds[ds$ap_hi>60 & ds$ap_lo>60,]
+```
+
+
+Separate our dataset into learning set and validation set as 80/20.
+
+```{r, include=FALSE}
+#############################################
+# Split data to learning and validation set #
+#############################################
+# in ration 8/2
+tI <- dim(ds)[1] * 0.8
+
+training_set <- ds[1:tI, ]
+validation_set <- ds[(tI+1):dim(ds)[1], ]
+```
+
+Now our training contains `r dim(training_set)[1]` rows and our validation set - `r dim(validation_set)[1]` rows.
+
+First 6 rows of our preprocessed dataset are shown in table 1.1.
+
+
+Table 1.1. Preprocessed dataset
+
+```{r, echo=FALSE}
+head(training_set) %>% kable() %>% kable_styling(bootstrap_options = c("striped"), position = "center", font_size = 10, full_width = TRUE)
+```
+
+
+## 1.2. EDA
+
+Firstly check for missing values
+
+```{r, echo=FALSE}
+sapply(training_set, function(x) sum(is.na(x))) %>% 
+kable() %>% 
+kable_styling(bootstrap_options = c("striped"), position = "center", font_size = 10, full_width = TRUE)
+```
+
+Plot count of $y$ value in your train set to see if it's imbalanced. Count of $y$ for both class is shown in figure 1.1. As we can see is not imbalanced.
+
+```{r, echo=FALSE}
+ggplot(training_set,aes(as.factor(cardio),fill=as.factor(cardio)))+
+  geom_bar(stat="count")+
+  labs(x="Presence or absence of cardiovascular disease") + scale_fill_discrete(name = "", labels = c("Absence", "Presence"))
+```
+
+Fig. 1.1. Count of $y$ for both class
+
+
+Now let's check if in our dataset exists some correlation between presence of cardiovascular disease and age of patients. Density plot and boxplot of age and disease is shown in figure 1.2.
+
+```{r, echo=FALSE}
+g1 <- ggplot(training_set,aes(age,col=as.factor(cardio),fill=as.factor(cardio)))+
+  geom_density(alpha=0.2)+
+  labs(fill="Cardiovascular disease",x="Age")   + theme(legend.position="none")
+
+g2 <- ggplot(training_set,aes(as.factor(cardio),age,fill=as.factor(cardio)))+
+  geom_boxplot()+
+  labs(y="Age",x="Cardiovascular disease",fill="Cardiovascular disease") + scale_x_discrete(labels=c("Absence","Presence"))  + theme(legend.position="none")
+
+grid.arrange(g1, g2)
+```
+
+Fig. 1.2. Density plot and boxplot of age and disease
+
+
+From the plot above we can see that older peoples are more likely to have a disease, but intervals are overlapping.
+
+
+Now let's see a structure of gender based on cardiovascular disease, it is shown in figure 1.3
+
+```{r, echo=FALSE}
+ggplot(training_set,aes(as.factor(gender),fill=as.factor(cardio)))+
+  geom_bar(stat="count")+
+  labs(x="Gender",fill="Cardiovascular disease") + scale_fill_discrete(labels = c("Absence", "Presence")) + scale_x_discrete(labels = c("Female","Male"))
+```
+
+Fig. 1.3. Structure of gender based on cardiovascular disease
+
+
+From the image above we can see that in our dataset is more females that males, but structure of cardiovascular disease between sexes in similar.
+
+
+Weight and height can have influence of each other, so plot weight vs. height with color marking of cardiovascular disease status.
+
+```{r, echo=FALSE}
+ggplot(training_set, aes(x = height, y = weight, color=as.factor(cardio))) + geom_point()  + scale_colour_discrete(name="Cardiovascular disease", labels = c("Absence", "Presence"))
+```
+
+Fig. 1.4. Scatterplot height vs. weight with cardiovascular disease status
+
+
+As we can see there is almost no correlation betwwen height, weight and cardiovascular disease status. But there is a dependence between weight, height and gender. It was show at figure 1.5.
+
+
+```{r, echo=FALSE}
+ggplot(training_set, aes(x = height, y = weight, color=as.factor(gender))) +
+  geom_point() + scale_colour_discrete(name="Gender", labels = c("Female", "Male"))
+```
+
+Figure. 1.5. Scatterplot height vs. weight with gender
+
+
+Now let's plot a systolic blood pressure vs. diastolic blood pressure with cardiovascular disease status, it is shown in figure 1.6. 
+
+
+```{r, echo=FALSE}
+ggplot(training_set, aes(x = ap_lo, y = ap_hi, color=as.factor(cardio))) +
+  geom_point()  +
+  scale_colour_discrete(name="Cardiovascular disease", labels = c("Absence", "Presence"))
+```
+
+Figure. 1.6. Scatterplot systolic blood pressure vs. diastolic blood pressure with cardiovascular disease status
+
+Additionaly let's examine boxplot for the same - figure 1.7. For most cases higher value of blood preasure means presence of disease. 
+
+```{r, echo=FALSE}
+g1 <- ggplot(training_set,aes(as.factor(cardio),ap_hi,fill=as.factor(cardio)))+
+  geom_boxplot()+
+  labs(y="Systolic blood pressure [mm Hg]", x="Cardiovascular disease")+
+  scale_x_discrete(labels=c("Absence","Presence")) + theme(legend.position="none")
+
+g2 <- ggplot(training_set,aes(as.factor(cardio),ap_lo,fill=as.factor(cardio)))+
+  geom_boxplot()+
+  labs(y="Diastolic blood pressure [mm Hg]", x="Cardiovascular disease") +
+  scale_x_discrete(labels=c("Absence","Presence")) + theme(legend.position="none")
+
+grid.arrange(g1, g2)
+```
+
+Fig. 1.7. Boxplot systolic blood pressure vs. diastolic blood pressure with cardiovascular disease status
+
+```{r, echo=TRUE}
+mean(training_set[training_set$cardio == 0,]$ap_lo)
+mean(training_set[training_set$cardio == 1,]$ap_lo)
+```
+
+Deviation in both cases deviation for diastolic blood pressure is not simetrical, and in diastolic blood pressure there is no overlapping in intervals but both cases contains lot of outliners.
+
+Cholesterole can by high when person eats to much fatty food, it can be also genetically inherited. Cardiovascular disease in groups of level of cholesterol is shown i figure 1.8. Cardiovascular disease in present in all 3 group of levels of cholesterole. But it share in total count grows with level of cholesterole.
+
+```{r, echo=FALSE}
+ggplot(training_set,aes(as.factor(cholesterol),fill=as.factor(cardio)))+
+  geom_bar(stat="count")+
+  labs(x="Cholesterole level",fill="Cardiovascular disease") + scale_fill_discrete(labels = c("Absence", "Presence")) + scale_x_discrete(labels = c("Normal","Above normal","Well above normal"))
+```
+
+Fig. 1.8. Cardiovascular disease in groups of level of cholesterol
+
+Similar behavior we can see with glucose level, it was shown in figure 1.9
+
+```{r, echo=FALSE}
+ggplot(training_set,aes(as.factor(gluc),fill=as.factor(cardio)))+
+  geom_bar(stat="count")+
+  labs(x="Glucose level",fill="Cardiovascular disease") + scale_fill_discrete(labels = c("Absence", "Presence")) + scale_x_discrete(labels = c("Normal","Above normal","Well above normal"))
+
+```
+
+Figure. 1.9. Cardiovascular disease in groups of level of glucose
+
+Smoking, alcohol intake and even physical activity have small influence on presence of cardiovascular disease, it is shown in figure 1.10.
+
+```{r, echo=FALSE}
+g1<-ggplot(training_set,aes(as.factor(smoke),fill=as.factor(cardio)))+
+  geom_bar(stat="count")+
+  labs(x="Smoking",fill="Cardiovascular disease") + scale_fill_discrete(labels = c("Absence", "Presence")) + scale_x_discrete(labels = c("No","Yes"))
+
+
+g2<-ggplot(training_set,aes(as.factor(alco),fill=as.factor(cardio)))+
+  geom_bar(stat="count")+
+  labs(x="Alcohol intake",fill="Cardiovascular disease") + scale_fill_discrete(labels = c("Absence", "Presence")) + scale_x_discrete(labels = c("No","Yes"))
+
+
+g3<-ggplot(training_set,aes(as.factor(active),fill=as.factor(cardio)))+
+  geom_bar(stat="count")+
+  labs(x="Physical activity",fill="Cardiovascular disease") + scale_fill_discrete(labels = c("Absence", "Presence")) + scale_x_discrete(labels = c("No","Yes"))
+
+grid.arrange(g1, g2, g3)
+```
+
+Figure. 1.10. Smoking, alcohol intake and physical activity influence on cardiovascular disease presence or absence 
+
+As we can see from figure 1.11, in our dataset, there is no strong corelation between values. We can see some weak correlation between ap_hi and cardio, and ap_lo and ap_hi.
+
+```{r, echo=FALSE}
+ggcorrplot(cor(training_set),lab = T)
+```
+
+Fig. 1.11. Correlation betwwen values in dataset
+
+
+
+
+# 2. Model creation and evaluate
+
+For purpose of predicting abence of presence of cardiovacsular desease, we used 4 types of approach:
+- Neural network;
+- Random Forest
+- Logistic regression;
+- Logistic regression with regularization;
+- XGBoost.
+
+Firstly, let's define our evaluate function. We will use it to check accuracy of our models.
+```{r, include=TRUE}
+ev_matt <- function (act, pred){
+  TP <- sum(act == 1 & pred == 1)
+  TN <- sum(act == 0 & pred == 0)
+  FP <- sum(act == 0 & pred == 1)
+  FN <- sum(act == 1 & pred == 0)
+
+  denom <- as.double(TP+FP)*(TP+FN)*(TN+FP)*(TN+FN)
+  if (any((TP+FP) == 0, (TP+FN) == 0, (TN+FP) == 0, (TN+FN) == 0)) denom <- 1
+  mcc <- ((TP*TN)-(FP*FN)) / sqrt(denom)
+  mcc
+}
+
+#Function for preprocess values:
+
+mat_p <- function(val){
+  round(val*100,1)
+}
+
+```
+
+
+Our first model if a neural netowrk with 20 hidden neurons.
+```{r, include=TRUE}
+nn <- nnet(cardio~.,data=training_set,size=20,maxit=1000)
+preds = predict(nn,newdata=validation_set)
+nn_score <- ev_matt(validation_set$cardio,preds>0.5)
+```
+Accuracy of this model is: `r mat_p(nn_score)`%
+
+
+The next model is random forest model:
+```{r, include=TRUE}
+training_setR <- training_set %>% select(-cardio)
+rf <- randomForest(training_setR,as.factor(training_set$cardio))
+validation_setR <- validation_set %>% select(-cardio)
+rf_score <- ev_matt(predict(rf,newdata=validation_setR),validation_set$cardio)
+```
+Accuracy of this model is: `r mat_p(rf_score)`%
+
+
+Logistic regression:
+```{r, include=TRUE}
+logi <- glm(cardio~.,data=training_set,family=binomial(link="logit"))
+logi_score <- ev_matt(predict(logi,type="response",newdata=validation_set)>0.5,
+validation_set$cardio)
+```
+Accuracy of this model is: `r mat_p(logi_score)`%
+
+
+Logistic regression with regularization:
+```{r, include=TRUE}
+train.vars <- as.matrix(select(training_set,-cardio))
+valid.vars <- as.matrix(select(validation_set,-cardio))
+lgwr <- cv.glmnet(train.vars,training_set$cardio,family="binomial")
+lgwr_score <- ev_matt(predict(lgwr,valid.vars,s="lambda.min",type="response")>0.5,
+validation_set$cardio)
+
+```
+Accuracy of this model is: `r mat_p(lgwr_score)`%
+
+XGBoost:
+```{r, include=TRUE}
+xgbo <- xgboost(data=train.vars,label=training_set$cardio,nrounds=100)
+xgbo_score <- ev_matt(predict(xgbo,newdata=valid.vars)>0.5,validation_set$cardio)
+```
+Accuracy of this model is: `r mat_p(xgbo_score)`%
+
+
+## 2.1. Results
+Accuracy of each of model was quite similar, it can mean that the value we want to predict is not dependant on features that we have in out dataset. Overall the best model was a random tree model.
+
+
+# Conclusion
+The best way to improve models accuracy is to find relation between something and the presence of cardiovascular desease and colect information about it to check accuracy of models on the new data. 
+The other case can be it that data is acquired in messy way, as we could see earlier in preprocessing part.
